@@ -1,6 +1,6 @@
 # scHyperMod
 
-A hypergraph-based module-aware masked autoencoder framework for unsupervised clustering of single-cell RNA-seq data.
+Hypergraph-Enhanced Self-Supervised Learning with Module-Aware Structured Masking for Single-Cell Transcriptomic Clustering.
 
 ## Requirements
 
@@ -14,22 +14,22 @@ A hypergraph-based module-aware masked autoencoder framework for unsupervised cl
 First, download scHyperMod from github and change to the directory:
 
 ```bash
-git clone https://github.com/zhyu-lab/scHyperMod
-cd scHyperMod
+git clone https://github.com/zhyu-lab/schypermod
+cd schypermod
 ```
 
 ## Create conda environment (optional)
 
-Create a new environment named "scHyperMod":
+Create a new environment named "schypermod":
 
 ```bash
-conda create --name scHyperMod python=3.10
+conda create --name schypermod python=3.10
 ```
 
 Then activate it:
 
 ```bash
-conda activate scHyperMod
+conda activate schypermod
 ```
 
 ## Install requirements
