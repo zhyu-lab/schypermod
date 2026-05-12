@@ -123,4 +123,4 @@ Other evaluation hyperparameters are fixed in the `CONFIG` dictionary in `evalua
 
 # Contact
 
-If you have any questions, please contact 2939443031@qq.com.
+If you have any questions, please contact cyw_nxu@163.com.
