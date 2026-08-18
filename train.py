@@ -207,6 +207,23 @@ def build_weighted_topk_graph(W, k=20):
     return A
 
 
+def build_propagation_matrix(H):
+    De = H.sum(dim=0)
+    Dv = H.sum(dim=1)
+
+    De_inv = De.pow(-1.0)
+    Dv_inv_sqrt = Dv.pow(-0.5)
+
+    De_inv.masked_fill_(torch.isinf(De_inv) | torch.isnan(De_inv), 0.0)
+    Dv_inv_sqrt.masked_fill_(torch.isinf(Dv_inv_sqrt) | torch.isnan(Dv_inv_sqrt), 0.0)
+
+    H_De = H * De_inv.unsqueeze(0)
+    adj = torch.matmul(H_De, H.T)
+
+    P = adj * Dv_inv_sqrt.unsqueeze(1) * Dv_inv_sqrt.unsqueeze(0)
+    return P
+
+
 class HypergraphConv(nn.Module):
     def __init__(self, in_dim, out_dim, bias=True):
         super().__init__()
@@ -218,23 +235,7 @@ class HypergraphConv(nn.Module):
         else:
             self.bias = None
 
-    def forward(self, X, H):
-        H = H.to(X.device)
-
-        De = H.sum(dim=0)
-        Dv = H.sum(dim=1)
-
-        De_inv = De.pow(-1.0)
-        Dv_inv_sqrt = Dv.pow(-0.5)
-
-        De_inv.masked_fill_(torch.isinf(De_inv) | torch.isnan(De_inv), 0.0)
-        Dv_inv_sqrt.masked_fill_(torch.isinf(Dv_inv_sqrt) | torch.isnan(Dv_inv_sqrt), 0.0)
-
-        H_De = H * De_inv.unsqueeze(0)
-        adj = torch.matmul(H_De, H.T)
-
-        P = adj * Dv_inv_sqrt.unsqueeze(1) * Dv_inv_sqrt.unsqueeze(0)
-
+    def forward(self, X, P):
         base_transform = X @ self.theta
         out = P @ base_transform
         out = self.skip_weight * out + (1.0 - self.skip_weight) * base_transform
@@ -256,9 +257,13 @@ class HypergraphAE(nn.Module):
             nn.Linear(hid_dim, in_dim),
         )
 
-    def forward(self, X, H):
-        h = F.relu(self.hg1(X, H))
-        z = self.hg2(h, H)
+    def forward(self, X, H=None, P=None):
+        if P is None:
+            if H is None:
+                raise ValueError("Either H or P must be provided to HypergraphAE.forward.")
+            P = build_propagation_matrix(H.to(X.device))
+        h = F.relu(self.hg1(X, P))
+        z = self.hg2(h, P)
         Xrec = self.decoder(F.relu(z))
         return z, Xrec
 
@@ -302,10 +307,12 @@ class HypergraphAEWrapper(nn.Module):
         self.hg_model = HypergraphAE(in_dim=input_dim, hid_dim=hid_dim, emb_dim=emb_size)
         self.proj = ProjectionHead(emb_size, hidden=proj_hidden, out_dim=proj_out)
 
-    def forward(self, x, H):
-        if H is None:
-            raise ValueError("H must be provided to HypergraphAEWrapper.forward.")
-        z, recon = self.hg_model(x, H)
+    def forward(self, x, H=None, P=None):
+        if P is None:
+            if H is None:
+                raise ValueError("Either H or P must be provided to HypergraphAEWrapper.forward.")
+            P = build_propagation_matrix(H.to(x.device))
+        z, recon = self.hg_model(x, P=P)
         proj = self.proj(z)
         return recon, z, proj
 
@@ -335,7 +342,8 @@ def extract_embeddings(model, rna_data, cfg):
             idx_start = i * train_cfg["batch_size"]
             idx_end = idx_start + Xb.shape[0]
             H_batch = model.H_global[idx_start:idx_end, :]
-            _, z, _ = model(Xb, H=H_batch)
+            P_batch = build_propagation_matrix(H_batch)
+            _, z, _ = model(Xb, P=P_batch)
             z_norm = F.normalize(z, p=2, dim=1)
             embeddings.append(z_norm)
 
@@ -489,9 +497,6 @@ def train(cfg):
 
         criterion.temperature = current_temp
 
-        if device.type == "cuda" and epoch % 5 == 0:
-            torch.cuda.empty_cache()
-
         rindexs = np.arange(len(rna_data))
         np.random.shuffle(rindexs)
         rna_loader = DataLoader(rna_data[rindexs], batch_size=train_cfg["batch_size"], shuffle=False, drop_last=True)
@@ -500,8 +505,6 @@ def train(cfg):
         for j in range(x_perm.shape[1]):
             np.random.shuffle(x_perm[:, j])
         x_perm = torch.tensor(x_perm, dtype=torch.float32)
-
-        We = torch.tensor(W_lap[rindexs][:, rindexs], dtype=torch.float32)
 
         total_loss = 0.0
         total_rec = 0.0
@@ -513,10 +516,12 @@ def train(cfg):
             Xb = Xb.to(device)
             B = Xb.shape[0]
             Xm = x_perm[i * B : (i + 1) * B, :].to(device)
-            Wb = We[i * B : (i + 1) * B, i * B : (i + 1) * B].to(device)
 
             batch_indices = rindexs[i * B : (i + 1) * B]
+            Wb_np = W_lap[np.ix_(batch_indices, batch_indices)]
+            Wb = torch.from_numpy(Wb_np).to(device=device, dtype=torch.float32)
             H_batch = model.H_global[batch_indices, :]
+            P_batch = build_propagation_matrix(H_batch)
 
             mask1, mask2 = sampler.sample_paired_views(B)
             mask1 = mask1.to(device)
@@ -525,8 +530,8 @@ def train(cfg):
             view1 = torch.where(mask1, Xm, Xb)
             view2 = torch.where(mask2, Xm, Xb)
 
-            xhat1, z1, proj1 = model(view1, H=H_batch)
-            xhat2, z2, proj2 = model(view2, H=H_batch)
+            xhat1, z1, proj1 = model(view1, P=P_batch)
+            xhat2, z2, proj2 = model(view2, P=P_batch)
 
             loss_rec = 0.5 * (recon_loss_masked(xhat1, Xb, mask1) + recon_loss_masked(xhat2, Xb, mask2))
             loss_contr = criterion(proj1, proj2)
